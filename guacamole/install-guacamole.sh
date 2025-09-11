@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Script de instalação do Apache Guacamole com SQLite
-# Para VMs com pouca RAM (1GB)
+# Script de instalação do Apache Guacamole com MariaDB
+# Otimizado para VMs com 1GB RAM
 
 set -e
 
-echo "🚀 Instalando Apache Guacamole com SQLite..."
+echo "🚀 Instalando Apache Guacamole com MariaDB..."
 
 # Cores para output
 RED='\033[0;31m'
@@ -13,7 +13,6 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Função para log
 log() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
@@ -54,7 +53,7 @@ if [ -d "$PROJECT_DIR" ]; then
     log "Removendo instalação anterior..."
     cd $PROJECT_DIR
     docker-compose down --volumes 2>/dev/null || true
-    docker volume rm guacamole_data 2>/dev/null || true
+    docker volume rm $(docker volume ls -q | grep guacamole) 2>/dev/null || true
     cd /
     rm -rf $PROJECT_DIR
 fi
@@ -64,16 +63,47 @@ log "Criando diretório: $PROJECT_DIR"
 mkdir -p $PROJECT_DIR
 cd $PROJECT_DIR
 
-# Criar docker-compose.yml otimizado
+# Gerar senhas seguras
+DB_ROOT_PASS=$(openssl rand -base64 16)
+DB_USER_PASS=$(openssl rand -base64 16)
+
+log "Senhas do banco geradas..."
+
+# Criar docker-compose.yml otimizado para 1GB RAM
 log "Criando docker-compose.yml..."
-cat > docker-compose.yml << 'EOF'
+cat > docker-compose.yml << EOF
 version: "3.8"
 services:
+  guacamole-db:
+    image: mariadb:10.6
+    container_name: guacamole-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: $DB_ROOT_PASS
+      MYSQL_DATABASE: guacamole_db
+      MYSQL_USER: guacuser
+      MYSQL_PASSWORD: $DB_USER_PASS
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    mem_limit: 200m
+    mem_reservation: 128m
+    command: >
+      --max-connections=50
+      --innodb-buffer-pool-size=64M
+      --innodb-log-buffer-size=8M
+      --query-cache-size=0
+      --query-cache-type=0
+      --tmp-table-size=8M
+      --max-heap-table-size=8M
+      --innodb-flush-log-at-trx-commit=2
+      --innodb-file-per-table=1
+
   guacd:
     image: guacamole/guacd:latest
     container_name: guacd
     restart: unless-stopped
-    mem_limit: 128m
+    mem_limit: 100m
     mem_reservation: 64m
 
   guacamole:
@@ -84,154 +114,76 @@ services:
       - "8082:8080"
     environment:
       GUACD_HOSTNAME: guacd
-      GUACAMOLE_HOME: /guacamole
-      CATALINA_OPTS: "-Xmx200m -Xms100m -XX:+UseSerialGC"
+      MYSQL_HOSTNAME: guacamole-db
+      MYSQL_DATABASE: guacamole_db
+      MYSQL_USER: guacuser
+      MYSQL_PASSWORD: $DB_USER_PASS
+      CATALINA_OPTS: "-Xmx200m -Xms100m -XX:+UseSerialGC -Djava.awt.headless=true"
     depends_on:
+      - guacamole-db
       - guacd
-    volumes:
-      - ./data:/guacamole
     mem_limit: 300m
     mem_reservation: 200m
 
 volumes:
-  guacamole_data:
+  db_data:
 EOF
 
-# Criar diretório de dados
-log "Criando estrutura de dados..."
-mkdir -p data
+# Salvar credenciais
+cat > credentials.txt << EOF
+=== CREDENCIAIS DO GUACAMOLE ===
+URL: http://$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}'):8082/guacamole
+Usuario Web: guacadmin
+Senha Web: guacadmin
 
-# Baixar imagens uma por vez para não sobrecarregar a RAM
-log "Baixando imagem guacd..."
+=== BANCO DE DADOS ===
+Root Password: $DB_ROOT_PASS
+User: guacuser
+Password: $DB_USER_PASS
+Database: guacamole_db
+EOF
+
+log "Credenciais salvas em credentials.txt"
+
+# Criar diretório para inicialização do banco
+mkdir -p initdb
+
+# Baixar schema oficial do Guacamole
+log "Baixando schema do banco..."
+docker run --rm guacamole/guacamole /opt/guacamole/bin/initdb.sh --mysql > initdb/001-initdb.sql
+
+# Baixar imagens
+log "Baixando imagens Docker..."
+docker pull mariadb:10.6
 docker pull guacamole/guacd:latest
-
-log "Baixando imagem guacamole..."
 docker pull guacamole/guacamole:latest
-
-# Criar schema SQLite básico
-log "Criando schema SQLite..."
-cat > data/guacamole.sql << 'EOF'
--- Schema básico do Guacamole para SQLite
-CREATE TABLE guacamole_entity (
-    entity_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        VARCHAR(128) NOT NULL,
-    type        VARCHAR(16) NOT NULL
-);
-
-CREATE TABLE guacamole_user (
-    user_id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    entity_id       INTEGER NOT NULL,
-    password_hash   BLOB NOT NULL,
-    password_salt   BLOB,
-    password_date   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    disabled        BOOLEAN NOT NULL DEFAULT 0,
-    expired         BOOLEAN NOT NULL DEFAULT 0,
-    access_window_start TIME,
-    access_window_end   TIME,
-    valid_from      TIMESTAMP,
-    valid_until     TIMESTAMP,
-    timezone        VARCHAR(64),
-    full_name       VARCHAR(256),
-    email_address   VARCHAR(256),
-    organization    VARCHAR(256),
-    organizational_role VARCHAR(256)
-);
-
-CREATE TABLE guacamole_user_group (
-    user_id   INTEGER NOT NULL,
-    group_id  INTEGER NOT NULL,
-    PRIMARY KEY (user_id, group_id)
-);
-
-CREATE TABLE guacamole_connection (
-    connection_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    connection_name     VARCHAR(128) NOT NULL,
-    parent_id           INTEGER,
-    protocol            VARCHAR(32) NOT NULL,
-    proxy_hostname      VARCHAR(512),
-    proxy_port          INTEGER,
-    proxy_encryption_method VARCHAR(4),
-    max_connections     INTEGER,
-    max_connections_per_user INTEGER,
-    connection_weight   INTEGER,
-    failover_only       BOOLEAN NOT NULL DEFAULT 0
-);
-
-CREATE TABLE guacamole_connection_parameter (
-    connection_id   INTEGER NOT NULL,
-    parameter_name  VARCHAR(128) NOT NULL,
-    parameter_value VARCHAR(4096),
-    PRIMARY KEY (connection_id, parameter_name)
-);
-
-CREATE TABLE guacamole_connection_permission (
-    entity_id     INTEGER NOT NULL,
-    connection_id INTEGER NOT NULL,
-    permission    VARCHAR(16) NOT NULL,
-    PRIMARY KEY (entity_id, connection_id, permission)
-);
-
--- Usuário admin padrão (guacadmin/guacadmin)
-INSERT INTO guacamole_entity (name, type) VALUES ('guacadmin', 'USER');
-INSERT INTO guacamole_user (entity_id, password_hash, password_salt) VALUES (
-    1,
-    X'CA458A7D494E3BE824F5E1E175A1556C0F8EEF2C2D7DF3633BEC4A29C4411960F44C4669DAD647',
-    X'FE24ADC5E11E2B25288D1704ABE67A79E342ECC26064CE69C5B3177795A82264'
-);
-EOF
-
-# Criar guacamole.properties
-log "Criando configuração..."
-cat > data/guacamole.properties << 'EOF'
-# SQLite properties
-sqlite-driver: org.sqlite.JDBC
-sqlite-url: jdbc:sqlite:/guacamole/guacamole.db
-sqlite-auto-create-accounts: true
-
-# Basic auth
-basic-user-mapping: /guacamole/user-mapping.xml
-EOF
-
-# Criar user-mapping básico
-cat > data/user-mapping.xml << 'EOF'
-<user-mapping>
-    <!-- Usuário de exemplo -->
-    <authorize username="demo" password="demo">
-        <connection name="SSH Local">
-            <protocol>ssh</protocol>
-            <param name="hostname">localhost</param>
-            <param name="port">22</param>
-        </connection>
-    </authorize>
-</user-mapping>
-EOF
 
 # Subir containers
 log "Iniciando containers..."
 docker-compose up -d
 
-# Aguardar containers
-log "Aguardando containers iniciarem..."
-sleep 15
+# Aguardar banco inicializar
+log "Aguardando banco de dados inicializar..."
+sleep 30
 
-# Criar banco SQLite
-log "Inicializando banco de dados..."
-docker exec guacamole bash -c "
-    apt-get update -qq && apt-get install -y sqlite3 -qq
-    cd /guacamole
-    sqlite3 guacamole.db < guacamole.sql
-    chown guacamole:guacamole guacamole.db
-    chmod 664 guacamole.db
-"
+# Verificar se banco está rodando
+for i in {1..12}; do
+    if docker exec guacamole-db mysqladmin ping -h localhost --silent; then
+        log "Banco de dados está rodando!"
+        break
+    fi
+    if [ $i -eq 12 ]; then
+        error "Banco de dados não iniciou corretamente"
+    fi
+    log "Aguardando banco... ($i/12)"
+    sleep 5
+done
 
-# Reiniciar guacamole para carregar o banco
-log "Reiniciando Guacamole..."
-docker-compose restart guacamole
+# Aguardar Guacamole inicializar
+log "Aguardando Guacamole inicializar..."
+sleep 20
 
-# Aguardar reinicialização
-sleep 10
-
-# Verificar status
+# Verificar status final
 log "Verificando containers..."
 docker-compose ps
 
@@ -241,19 +193,21 @@ SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
 echo ""
 echo "✅ Guacamole instalado com sucesso!"
 echo ""
-echo "📋 Acesso:"
+echo "📋 Informações de acesso:"
 echo "   🌐 URL: http://$SERVER_IP:8082/guacamole"
 echo "   👤 Usuário: guacadmin"
 echo "   🔑 Senha: guacadmin"
 echo ""
-echo "🛠️  Comandos úteis:"
-echo "   docker-compose logs -f    # Ver logs"
-echo "   docker-compose restart    # Reiniciar"
-echo "   docker stats             # Monitor RAM"
+echo "📄 Credenciais salvas em: $PROJECT_DIR/credentials.txt"
 echo ""
-echo "⚠️  IMPORTANTE: Troque a senha padrão!"
+echo "🛠️  Comandos úteis:"
+echo "   docker-compose logs -f           # Ver logs"
+echo "   docker-compose restart           # Reiniciar"
+echo "   docker stats --no-stream        # Monitor RAM"
+echo ""
+echo "⚠️  IMPORTANTE: Troque a senha padrão após primeiro login!"
 
-# Mostrar uso de RAM final
+# Mostrar uso de RAM
 echo ""
 echo "💾 Uso atual de memória:"
 free -h
@@ -261,3 +215,4 @@ echo ""
 docker stats --no-stream --format "table {{.Container}}\t{{.MemUsage}}\t{{.CPUPerc}}"
 
 log "Instalação concluída!"
+echo "🔍 Para ver as credenciais: cat $PROJECT_DIR/credentials.txt"
