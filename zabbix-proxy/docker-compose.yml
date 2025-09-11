@@ -1,0 +1,14 @@
+docker-compose:
+version: '3.8'
+
+services:
+zabbix-proxy:
+image: zabbix/zabbix-proxy-sqlite3:alpine-7.0-latest
+container_name: zabbix-proxy
+restart: unless-stopped
+network_mode: host
+user: root
+environment:
+- ZBX_HOSTNAME=$NOME
+- ZBX_SERVER_HOST=$IP
+- ZBX_PROXYMODE=0
