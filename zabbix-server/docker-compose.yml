@@ -1,0 +1,174 @@
+version: "3.8"
+services:
+  postgres:
+    image: postgres:15
+    container_name: zbx-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: zabbix
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: zabbix_pass
+      TZ: America/Sao_Paulo
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    networks:
+      - zabbix-network
+    # Configurações PostgreSQL otimizadas para 6 cores / 12GB RAM
+    command: |
+      postgres
+      -c shared_buffers=2GB
+      -c effective_cache_size=8GB
+      -c maintenance_work_mem=512MB
+      -c work_mem=32MB
+      -c max_connections=150
+      -c max_worker_processes=6
+      -c max_parallel_workers_per_gather=3
+      -c max_parallel_workers=6
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=32MB
+      -c max_wal_size=4GB
+      -c min_wal_size=2GB
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c autovacuum_max_workers=3
+      -c autovacuum_naptime=15s
+      -c synchronous_commit=off
+      -c full_page_writes=off
+      -c log_min_duration_statement=1000
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+        reservations:
+          memory: 3G
+
+  zabbix-server:
+    image: zabbix/zabbix-server-pgsql:ubuntu-7.0-latest
+    container_name: zbx-server
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    environment:
+      DB_SERVER_HOST: postgres
+      POSTGRES_DB: zabbix
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: zabbix_pass
+      TZ: America/Sao_Paulo
+      
+      # OTIMIZAÇÕES PARA 400 HOSTS + 6 CORES
+      # Configurações de Cache (aumentadas para 12GB RAM)
+      ZBX_CACHESIZE: 1G
+      ZBX_CACHEUPDATEFREQUENCY: 60
+      ZBX_STARTDBSYNCERS: 6
+      ZBX_HISTORYCACHESIZE: 512M
+      ZBX_HISTORYINDEXCACHESIZE: 128M
+      ZBX_TRENDCACHESIZE: 128M
+      ZBX_VALUECACHESIZE: 512M
+      
+      # Configurações de Processos (otimizadas para 6 cores)
+      ZBX_STARTPOLLERS: 30
+      ZBX_STARTPOLLERSUNREACHABLE: 6
+      ZBX_STARTTRAPPERS: 12
+      ZBX_STARTPINGERS: 6
+      ZBX_STARTDISCOVERERS: 4
+      ZBX_STARTHTTPPOLLERS: 6
+      ZBX_STARTTIMERS: 6
+      ZBX_STARTESCALATORS: 4
+      ZBX_STARTPREPROCESSORS: 6
+      ZBX_STARTLLDPROCESSORS: 4
+      
+      # Configurações de Timeout
+      ZBX_TIMEOUT: 30
+      ZBX_UNREACHABLEPERIOD: 45
+      ZBX_UNAVAILABLEDELAY: 60
+      ZBX_UNREACHABLEDELAY: 15
+      
+      # Configurações de Log e Performance
+      ZBX_LOGSLOWQUERIES: 3000
+      ZBX_LOGLEVEL: 3
+      ZBX_HOUSEKEEPINGFREQUENCY: 1
+      ZBX_MAXHOUSEKEEPERDELETE: 50000
+      
+    volumes:
+      - ./zabbix_data:/var/lib/zabbix
+      - ./custom/alertscripts:/usr/lib/zabbix/alertscripts
+      - ./custom/externalscripts:/usr/lib/zabbix/externalscripts
+    ports:
+      - "10051:10051"
+    networks:
+      - zabbix-network
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+
+  zabbix-web:
+    image: zabbix/zabbix-web-nginx-pgsql:alpine-7.0-latest
+    container_name: zbx-web
+    depends_on:
+      - zabbix-server
+      - postgres
+    restart: unless-stopped
+    environment:
+      DB_SERVER_HOST: postgres
+      POSTGRES_DB: zabbix
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: zabbix_pass
+      ZBX_SERVER_HOST: zabbix-server
+      PHP_TZ: America/Sao_Paulo
+      
+      # CUSTOMIZAÇÃO DO TÍTULO DA PÁGINA
+      ZBX_SERVER_NAME: "Monitoramento-MG"
+      
+      # OTIMIZAÇÕES PHP PARA 400 HOSTS + 6 CORES
+      PHP_MEMORY_LIMIT: 768M
+      PHP_MAX_EXECUTION_TIME: 300
+      PHP_MAX_INPUT_TIME: 300
+      PHP_POST_MAX_SIZE: 64M
+      PHP_UPLOAD_MAX_FILESIZE: 64M
+      PHP_MAX_INPUT_VARS: 10000
+      
+      # Configurações otimizadas do Nginx para 6 cores
+      NGINX_CLIENT_MAX_BODY_SIZE: 64M
+      NGINX_WORKER_PROCESSES: 6
+      NGINX_WORKER_CONNECTIONS: 2048
+      
+    ports:
+      - "80:8080"
+      - "443:8443"
+    networks:
+      - zabbix-network
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
+        reservations:
+          memory: 768M
+
+  zabbix-agent:
+    image: zabbix/zabbix-agent:alpine-7.0-latest
+    container_name: zbx-agent
+    depends_on:
+      - zabbix-server
+    restart: unless-stopped
+    environment:
+      ZBX_HOSTNAME: "Zabbix Server Local"
+      ZBX_SERVER_HOST: zabbix-server
+      ZBX_SERVER_PORT: "10051"
+      ZBX_ACTIVE_ALLOW: "true"
+      ZBX_PASSIVE_ALLOW: "true"
+      TZ: America/Sao_Paulo
+    ports:
+      - "10050:10050"
+    networks:
+      - zabbix-network
+    privileged: true
+    pid: host
+
+networks:
+  zabbix-network:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: zbx-bridge
