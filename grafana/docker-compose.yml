@@ -1,8 +1,0 @@
-services:
-  grafana:
-    image: grafana/grafana-oss:latest
-    container_name: grafana
-    ports:
-    volumes:
-      - ./grafana-data:/var/lib/grafana
-    restart: unless-stopped
